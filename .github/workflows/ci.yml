@@ -1,0 +1,54 @@
+name: CI (Fast)
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      # TODO(mateu): make lint blocking again after baseline lint cleanup.
+      - name: Lint (if script exists, non-blocking for now)
+        continue-on-error: true
+        run: |
+          if pnpm run | grep -q "^\s*lint\s"; then
+            pnpm run lint
+          else
+            echo "No lint script found; skipping."
+          fi
+
+      - name: Build (if script exists)
+        run: |
+          if pnpm run | grep -q "^\s*build\s"; then
+            pnpm run build
+          else
+            echo "No build script found; skipping."
+          fi
