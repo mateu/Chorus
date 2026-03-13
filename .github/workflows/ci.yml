@@ -1,6 +1,16 @@
 name: CI (Fast)
 
 on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Branch or SHA to test"
+        required: false
+        type: string
+      pr_number:
+        description: "PR number (optional, for traceability)"
+        required: false
+        type: string
   pull_request:
     branches: [main]
   push:
@@ -8,6 +18,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-fast-${{ github.event.inputs.target_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   quality:
@@ -17,6 +31,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_ref || github.sha }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

@@ -1,12 +1,25 @@
 name: Docker Smoke
 
 on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Branch or SHA to test"
+        required: false
+        type: string
+      pr_number:
+        description: "PR number (optional, for traceability)"
+        required: false
+        type: string
   pull_request:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: docker-smoke-${{ github.event.inputs.target_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   smoke:
@@ -16,6 +29,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_ref || github.sha }}
 
       - name: Compose up (db + redis)
         run: docker compose up -d db redis
