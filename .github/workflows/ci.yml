@@ -1,0 +1,67 @@
+name: CI (Fast)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Branch or SHA to test"
+        required: false
+        type: string
+      pr_number:
+        description: "PR number (optional, for traceability)"
+        required: false
+        type: string
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-fast-${{ github.event.inputs.target_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_ref || github.sha }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      # TODO(mateu): make lint blocking again after baseline lint cleanup.
+      - name: Lint (if script exists, non-blocking for now)
+        continue-on-error: true
+        run: |
+          if pnpm run | grep -q "^\s*lint\s"; then
+            pnpm run lint
+          else
+            echo "No lint script found; skipping."
+          fi
+
+      - name: Build (if script exists)
+        run: |
+          if pnpm run | grep -q "^\s*build\s"; then
+            pnpm run build
+          else
+            echo "No build script found; skipping."
+          fi

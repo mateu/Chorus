@@ -1,0 +1,25 @@
+name: Release / Deploy (Scaffold)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.repository == 'mateu/Chorus'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy placeholder
+        run: |
+          echo "Add your deploy script/command here (kept as scaffold)."
+          echo "Event: ${{ github.event_name }} Ref: ${{ github.ref }}"
