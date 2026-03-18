@@ -51,11 +51,13 @@ esac
 PENDING_DIR="${CLAUDE_PROJECT_DIR:-.}/.chorus/pending"
 mkdir -p "$PENDING_DIR"
 
-# Use agent name as filename; fall back to timestamp-based unique name
-PENDING_NAME="${AGENT_NAME:-unknown-$(date +%s%N)}"
+# Use a filesystem-safe unique filename; keep true name/type in JSON payload.
+# This avoids failures when agent names contain spaces/slashes/special chars.
+SAFE_HINT=$(printf '%s' "${AGENT_NAME:-unknown}" | tr -cs '[:alnum:]._=-' '_' | sed 's/^_\+//; s/_\+$//' | cut -c1-80)
+PENDING_FILE="$(date +%s%N)-${SAFE_HINT:-unknown}.json"
 printf '{"name":"%s","type":"%s","ts":"%s"}\n' \
   "${AGENT_NAME:-}" "${AGENT_TYPE:-}" "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" \
-  > "${PENDING_DIR}/${PENDING_NAME}"
+  > "${PENDING_DIR}/${PENDING_FILE}"
 
 CONTEXT="[Chorus Plugin — Sub-agent Spawn]
 Session auto-managed by plugin. Do NOT call chorus_create_session.

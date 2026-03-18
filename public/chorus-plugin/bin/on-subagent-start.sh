@@ -69,26 +69,44 @@ mkdir -p "$CLAIMED_DIR"
 
 CLAIMED_FILE=""
 
-# Strategy 1: exact match by agent_type (CC uses name as agent_type)
-if [ -f "${PENDING_DIR}/${AGENT_TYPE}" ]; then
-  if mv "${PENDING_DIR}/${AGENT_TYPE}" "${CLAIMED_DIR}/${AGENT_ID}" 2>/dev/null; then
-    CLAIMED_FILE="${CLAIMED_DIR}/${AGENT_ID}"
-    AGENT_NAME="$AGENT_TYPE"
-  fi
+# Build a deterministic oldest-first candidate list (safe with spaces/special chars).
+list_pending_files() {
+  [ -d "$PENDING_DIR" ] || return 0
+  find "$PENDING_DIR" -maxdepth 1 -type f -printf '%T@ %p\n' 2>/dev/null \
+    | sort -n \
+    | sed 's/^[^ ]* //'
+}
+
+# Strategy 1: content match by pending payload name/type to AGENT_TYPE.
+# (SubagentStart often provides agent_type equal to Task.name.)
+if [ -n "$AGENT_TYPE" ] && [ -d "$PENDING_DIR" ]; then
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    CAND_NAME=$(jq -r '.name // empty' "$candidate" 2>/dev/null) || true
+    CAND_TYPE=$(jq -r '.type // empty' "$candidate" 2>/dev/null) || true
+    if [ "$CAND_NAME" = "$AGENT_TYPE" ] || [ "$CAND_TYPE" = "$AGENT_TYPE" ]; then
+      if mv "$candidate" "${CLAIMED_DIR}/${AGENT_ID}" 2>/dev/null; then
+        CLAIMED_FILE="${CLAIMED_DIR}/${AGENT_ID}"
+        AGENT_NAME="${CAND_NAME:-$AGENT_TYPE}"
+        break
+      fi
+    fi
+  done < <(list_pending_files)
 fi
 
 # Strategy 2: FIFO — claim oldest pending file
 if [ -z "$CLAIMED_FILE" ] && [ -d "$PENDING_DIR" ]; then
-  for candidate in $(ls -tr "$PENDING_DIR" 2>/dev/null); do
-    if mv "${PENDING_DIR}/${candidate}" "${CLAIMED_DIR}/${AGENT_ID}" 2>/dev/null; then
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    if mv "$candidate" "${CLAIMED_DIR}/${AGENT_ID}" 2>/dev/null; then
       CLAIMED_FILE="${CLAIMED_DIR}/${AGENT_ID}"
       # Read name from file content if available
       FILE_NAME=$(jq -r '.name // empty' "$CLAIMED_FILE" 2>/dev/null) || true
-      AGENT_NAME="${FILE_NAME:-$candidate}"
+      AGENT_NAME="${FILE_NAME:-$(basename "$candidate" .json)}"
       break
     fi
     # mv failed → another process claimed it first, try next
-  done
+  done < <(list_pending_files)
 fi
 
 # No pending file claimed → internal/cleanup agent → skip session creation
