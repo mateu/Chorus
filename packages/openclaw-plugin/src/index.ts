@@ -12,18 +12,104 @@ import { registerAdminTools } from "./tools/admin-tools.js";
 import { registerChorusCommands } from "./commands.js";
 
 /**
- * Trigger the OpenClaw agent by posting a system event to the gateway's
- * /hooks/wake endpoint. This enqueues the text into the agent's prompt
- * and triggers an immediate heartbeat so the agent processes it right away.
+ * Dispatch the OpenClaw agent via gateway hooks.
+ *
+ * Primary path: POST /hooks/agent (explicit agent turn execution).
+ * Fallback path: POST /hooks/wake (enqueue system event + heartbeat).
  */
-async function wakeAgent(
+async function dispatchAgent(
   gatewayUrl: string,
   hooksToken: string,
   text: string,
   logger: { info: (msg: string) => void; warn: (msg: string) => void },
+  metadata?: Record<string, unknown>,
 ) {
+  const isAutostart = text.includes("[Chorus][AUTOSTART]");
+  const taskUuid = typeof metadata?.entityUuid === "string" ? metadata.entityUuid : undefined;
+
   try {
-    const res = await fetch(`${gatewayUrl}/hooks/wake`, {
+    const autostartSessionKey = isAutostart && taskUuid
+      ? `hook:chorus:autostart:${taskUuid}`
+      : undefined;
+
+    // AUTOSTART path: use mapped hook endpoint so we can mark it trusted/internal
+    // via hook mapping config (allowUnsafeExternalContent=true for this path).
+    if (isAutostart && taskUuid) {
+      const autoRes = await fetch(`${gatewayUrl}/hooks/chorus-autostart`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${hooksToken}`,
+        },
+        body: JSON.stringify({
+          text,
+          taskUuid,
+        }),
+      });
+
+      if (autoRes.ok) {
+        logger.info(`Agent run dispatched (AUTOSTART session=${autostartSessionKey}): ${text.slice(0, 80)}...`);
+        return;
+      }
+
+      logger.warn(`AUTOSTART mapped dispatch failed (HTTP ${autoRes.status}); falling back to /hooks/agent`);
+    } else {
+      // Non-autostart Chorus notifications (mentions/comments/etc.) should also use a mapped
+      // trusted/internal hook path to avoid untrusted-webhook handling in the target session.
+      const notificationUuid = metadata?.notificationUuid;
+      const notificationSessionKey = notificationUuid
+        ? `agent:main:hook:chorus:notification:${notificationUuid}`
+        : undefined;
+
+      const notifRes = await fetch(`${gatewayUrl}/hooks/chorus-notification`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${hooksToken}`,
+        },
+        body: JSON.stringify({ text, sessionKey: notificationSessionKey }),
+      });
+
+      if (notifRes.ok) {
+        logger.info(`Agent run dispatched (NOTIFICATION): ${text.slice(0, 80)}...`);
+        return;
+      }
+
+      logger.warn(`Notification mapped dispatch failed (HTTP ${notifRes.status}); falling back to /hooks/agent`);
+    }
+
+    const agentRes = await fetch(`${gatewayUrl}/hooks/agent`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${hooksToken}`,
+      },
+      body: JSON.stringify({
+        name: isAutostart ? "chorus-autostart" : "chorus-notification",
+        agentId: "main",
+        message: text,
+        wakeMode: "now",
+        sessionKey: autostartSessionKey,
+        deliver: false,
+      }),
+    });
+
+    if (agentRes.ok) {
+      if (autostartSessionKey) {
+        logger.info(`Agent run dispatched (AUTOSTART session=${autostartSessionKey}): ${text.slice(0, 80)}...`);
+      } else {
+        logger.info(`Agent run dispatched: ${text.slice(0, 80)}...`);
+      }
+      return;
+    }
+
+    logger.warn(`Agent dispatch failed (HTTP ${agentRes.status}); falling back to wake`);
+  } catch (err) {
+    logger.warn(`Agent dispatch error: ${err}; falling back to wake`);
+  }
+
+  try {
+    const wakeRes = await fetch(`${gatewayUrl}/hooks/wake`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -31,13 +117,14 @@ async function wakeAgent(
       },
       body: JSON.stringify({ text, mode: "now" }),
     });
-    if (!res.ok) {
-      logger.warn(`Wake agent failed: HTTP ${res.status}`);
+
+    if (!wakeRes.ok) {
+      logger.warn(`Wake fallback failed: HTTP ${wakeRes.status}`);
     } else {
-      logger.info(`Agent woken: ${text.slice(0, 80)}...`);
+      logger.info(`Agent woken (fallback): ${text.slice(0, 80)}...`);
     }
   } catch (err) {
-    logger.warn(`Wake agent error: ${err}`);
+    logger.warn(`Wake fallback error: ${err}`);
   }
 }
 
@@ -87,13 +174,13 @@ const plugin = {
       mcpClient,
       config,
       logger,
-      triggerAgent: (message: string, _metadata?: Record<string, unknown>) => {
-        // Use /hooks/wake to enqueue a system event + trigger immediate heartbeat
+      triggerAgent: (message: string, metadata?: Record<string, unknown>) => {
+        // Prefer /hooks/agent for explicit execution; fallback to /hooks/wake.
         if (hooksToken) {
-          wakeAgent(gatewayUrl, hooksToken, message, logger);
+          dispatchAgent(gatewayUrl, hooksToken, message, logger, metadata);
         } else {
           logger.warn(
-            `[Chorus] Cannot wake agent — gateway.auth.token not configured. Event: ${message.slice(0, 100)}`
+            `[Chorus] Cannot dispatch agent — hooks.token not configured. Event: ${message.slice(0, 100)}`
           );
         }
       },
@@ -111,15 +198,23 @@ const plugin = {
           logger,
           onEvent: (event) => eventRouter.dispatch(event),
           onReconnect: async () => {
-            // Back-fill missed notifications after reconnect
+            // Back-fill missed notifications after reconnect.
+            // Dispatch each unread notification UUID through the router so
+            // idempotent checkpointing can skip already-handled events.
             try {
               const result = (await mcpClient.callTool("chorus_get_notifications", {
                 status: "unread",
                 autoMarkRead: false,
+                limit: 100,
               })) as { notifications?: Array<{ uuid: string }> } | null;
-              const count = result?.notifications?.length ?? 0;
-              if (count > 0) {
-                logger.info(`SSE reconnect: ${count} unread notifications to process`);
+              const notifications = result?.notifications ?? [];
+              if (notifications.length > 0) {
+                logger.info(`SSE reconnect: ${notifications.length} unread notifications to process`);
+              }
+
+              for (const n of notifications) {
+                if (!n?.uuid) continue;
+                eventRouter.dispatch({ type: "new_notification", notificationUuid: n.uuid });
               }
             } catch (err) {
               logger.warn(`Failed to back-fill notifications: ${err}`);

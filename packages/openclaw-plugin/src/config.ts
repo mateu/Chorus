@@ -23,7 +23,7 @@ export const chorusConfigSchema = z.object({
     .boolean()
     .optional()
     .default(true)
-    .describe("Auto-claim and start work on task_assigned events"),
+    .describe("On task_assigned: auto-claim only when task is open, then start work"),
 });
 
 export type ChorusPluginConfig = z.infer<typeof chorusConfigSchema>;
