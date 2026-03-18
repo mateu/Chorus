@@ -60,3 +60,10 @@ packages/chorus-cdk/lib/*.d.ts
 
 #demo
 dev-story-demo/
+
+# ops branch CI automation state/logs
+.github/.ci-dispatch-state.json
+note/ci-automation.log
+
+# docker overrides e.g. port
+docker-compose.override.yml
